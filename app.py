@@ -115,6 +115,28 @@ init_db()
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
+import io
+import qrcode
+
+def generate_qr_code(data_string: str) -> bytes:
+    """
+    Generates a PNG QR code image as bytes in memory.
+    """
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(data_string)
+    qr.make(fit=True)
+    
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    # Save image to in-memory byte buffer
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 def log_audit_search(query: str, status: str):
     """Logs verification lookup attempts for security audit trailing."""
     try:
@@ -244,34 +266,61 @@ elif page == "🔐 Admin Dashboard":
         
         tab1, tab2, tab3 = st.tabs(["➕ Add New Record", "📋 View All Records", "📊 Audit Log Trail"])
         
-        # TAB 1: ADD RECORD
-        with tab1:
-            st.subheader("Register New Appointment Letter")
-            with st.form("add_record_form", clear_on_submit=True):
-                col1, col2 = st.columns(2)
-                with col1:
-                    file_no = st.text_input("File Number *", placeholder="TSB/CSC/2026/045")
-                    full_name = st.text_input("Full Name *", placeholder="e.g. John Danjuma Bako")
-                    cadre = st.text_input("Cadre / Post *", placeholder="Administrative Officer II")
-                    grade_level = st.selectbox("Grade Level *", [f"GL {i:02d}" for i in range(1, 18)])
-                
-                with col2:
-                    mda = st.text_input("Ministry / Department / Agency *", placeholder="Ministry of Finance, Budget & Economic Planning")
-                    doa = st.date_input("Date of Effective Appointment")
-                    qr_code = st.text_input("Generated Security/QR ID *", placeholder="QR-2026-9901")
-                
-                submitted = st.form_submit_button("Save to Supabase Database", type="primary")
-                
-                if submitted:
-                    if not (file_no and full_name and cadre and mda and qr_code):
-                        st.error("Please fill in all required fields marked with *")
-                    else:
-                        try:
-                            add_record(file_no, full_name, cadre, grade_level, mda, doa, qr_code)
-                            st.success(f"Successfully registered appointment for {full_name} ({file_no})!")
-                        except Exception as e:
-                            st.error(f"Failed to register record. Check if File Number or QR ID already exists.")
-                            st.code(str(e))
+        # TAB 1: ADD RECORD & GENERATE QR CODE
+with tab1:
+    st.subheader("Register New Appointment Letter")
+    with st.form("add_record_form", clear_on_submit=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            file_no = st.text_input("File Number *", placeholder="TSB/CSC/2026/045")
+            full_name = st.text_input("Full Name *", placeholder="e.g. John Danjuma Bako")
+            cadre = st.text_input("Cadre / Post *", placeholder="Administrative Officer II")
+            grade_level = st.selectbox("Grade Level *", [f"GL {i:02d}" for i in range(1, 18)])
+        
+        with col2:
+            mda = st.text_input("Ministry / Department / Agency *", placeholder="Ministry of Finance, Budget & Economic Planning")
+            doa = st.date_input("Date of Effective Appointment")
+            qr_code_id = st.text_input("Generated Security/QR ID *", placeholder="QR-2026-9901")
+        
+        submitted = st.form_submit_button("Save Record & Generate QR Code", type="primary")
+        
+        if submitted:
+            if not (file_no and full_name and cadre and mda and qr_code_id):
+                st.error("Please fill in all required fields marked with *")
+            else:
+                try:
+                    # 1. Save to Supabase DB
+                    add_record(file_no, full_name, cadre, grade_level, mda, doa, qr_code_id)
+                    st.success(f"Successfully registered appointment for {full_name} ({file_no})!")
+                    
+                    # 2. Build verification data payload for QR code
+                    qr_payload = f"TARABA STATE CSC VERIFICATION\nFile No: {file_no.upper()}\nSecurity ID: {qr_code_id.upper()}\nName: {full_name}"
+                    
+                    # 3. Generate PNG QR bytes
+                    qr_img_bytes = generate_qr_code(qr_payload)
+                    
+                    # 4. Display and Download UI
+                    st.divider()
+                    st.subheader("Generated Official Security QR Code")
+                    qr_col1, qr_col2 = st.columns([1, 2])
+                    
+                    with qr_col1:
+                        st.image(qr_img_bytes, caption=f"QR Code for {file_no.upper()}", width=200)
+                    
+                    with qr_col2:
+                        st.markdown("### Print Ready Badge")
+                        st.write("Download this QR code PNG and attach/print it onto the official physical appointment letter.")
+                        
+                        st.download_button(
+                            label="📥 Download QR Code PNG",
+                            data=qr_img_bytes,
+                            file_name=f"CSC_QR_{file_no.replace('/', '_')}.png",
+                            mime="image/png",
+                            type="primary"
+                        )
+                except Exception as e:
+                    st.error("Failed to register record. Check if File Number or QR ID already exists.")
+                    st.code(str(e))
                             
         # TAB 2: VIEW RECORDS
         with tab2:
