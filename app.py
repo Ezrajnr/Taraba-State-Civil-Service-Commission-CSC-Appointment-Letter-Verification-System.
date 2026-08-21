@@ -75,7 +75,7 @@ st.set_page_config(
 )
 
 st.title("📜 Taraba State Civil Service Commission")
-st.subtitle("Official Appointment Letter Verification & Registry Portal")
+st.caption("Official Appointment Letter Verification & Registry Portal")
 
 # Main Navigation Tabs
 tab1, tab2 = st.tabs(["➕ Add New Record", "📋 View & Manage Records"])
