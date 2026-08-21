@@ -1,358 +1,293 @@
 import streamlit as st
 import pandas as pd
-import hashlib
-import json
-import datetime
-import qrcode
-from io import BytesIO
+import urllib.parse
+from datetime import datetime
 from sqlalchemy import create_engine, text
 
-# -----------------------------------------------------------------------------
-# PAGE CONFIGURATION & STYLING
-# -----------------------------------------------------------------------------
+# ==========================================
+# 1. PAGE CONFIGURATION & STYLING
+# ==========================================
 st.set_page_config(
-    page_title="Taraba State CSC - Appointment Verification",
+    page_title="Taraba State CSC - Appointment Verification System",
     page_icon="📜",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.markdown("""
+# Custom CSS Styling
+st.markdown(
+    """
     <style>
     .main-header {
-        font-size: 26px;
-        font-weight: bold;
-        color: #1B5E20;
         text-align: center;
-        margin-bottom: 5px;
+        padding: 10px 0;
+        border-bottom: 2px solid #006699;
+        margin-bottom: 20px;
     }
-    .sub-header {
-        font-size: 16px;
-        color: #333333;
-        text-align: center;
-        margin-bottom: 25px;
+    .verified-badge {
+        background-color: #d4edda;
+        color: #155724;
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid #c3e6cb;
+        margin: 15px 0;
+    }
+    .unverified-badge {
+        background-color: #f8d7da;
+        color: #721c24;
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid #f5c6cb;
+        margin: 15px 0;
     }
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-st.markdown('<div class="main-header">GOVERNMENT OF TARABA STATE OF NIGERIA</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Civil Service Commission, P.M.B. 1024, Jalingo, Taraba State<br><b>Document Authenticity & Fake Appointment Letter Detection System</b></div>', unsafe_allow_html=True)
-st.markdown("---")
-
-# -----------------------------------------------------------------------------
-# SUPABASE / POSTGRESQL DATABASE ENGINE
-# -----------------------------------------------------------------------------
+# ==========================================
+# 2. DATABASE CONNECTION & INITIALIZATION
+# ==========================================
 @st.cache_resource
 def get_db_engine():
-    """Establishes a cached connection engine to Supabase PostgreSQL."""
-    db_url = st.secrets["postgres"]["url"]
-    return create_engine(db_url, pool_pre_ping=True)
-
-import streamlit as st
-import urllib.parse
-from sqlalchemy import create_engine, text
-
-def init_db():
+    """
+    Safely builds SQLAlchemy engine using structured secrets
+    and encodes special characters in passwords.
+    """
     try:
-        # Retrieve connection string from Streamlit secrets
-        db_url = st.secrets["postgres"]["url"]
-        
-        # Initialize SQLAlchemy Engine
-        engine = create_engine(db_url)
-        
-        with engine.begin() as conn:
-            # Simple health check query
-            conn.execute(text("SELECT 1;"))
-        st.success("Successfully connected to the database!")
-        
+        if "postgres" in st.secrets and "user" in st.secrets["postgres"]:
+            pg = st.secrets["postgres"]
+            user = pg["user"]
+            # Encodes special characters (@, #, !, %, etc.) in password
+            password = urllib.parse.quote_plus(pg["password"])
+            host = pg["host"]
+            port = pg["port"]
+            dbname = pg["dbname"]
+            db_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+        else:
+            db_url = st.secrets["postgres"]["url"]
+
+        return create_engine(db_url, pool_pre_ping=True, pool_size=5, max_overflow=10)
     except Exception as e:
-        st.error("Database Connection Failed!")
+        st.error("Configuration Error: Failed to parse secrets for database connection.")
         st.code(str(e), language="bash")
         st.stop()
 
-# Call DB initialization
+engine = get_db_engine()
+
+def init_db():
+    """Initializes tables in Supabase PostgreSQL if they do not exist."""
+    create_registry_table = """
+    CREATE TABLE IF NOT EXISTS csc_registry (
+        id SERIAL PRIMARY KEY,
+        file_number VARCHAR(100) UNIQUE NOT NULL,
+        full_name VARCHAR(255) NOT NULL,
+        cadre VARCHAR(150) NOT NULL,
+        grade_level VARCHAR(50) NOT NULL,
+        mda VARCHAR(255) NOT NULL,
+        date_of_appointment DATE NOT NULL,
+        qr_code_id VARCHAR(100) UNIQUE NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """
+    
+    create_audit_table = """
+    CREATE TABLE IF NOT EXISTS csc_audit_logs (
+        id SERIAL PRIMARY KEY,
+        search_query VARCHAR(255) NOT NULL,
+        search_status VARCHAR(50) NOT NULL,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """
+    
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(create_registry_table))
+            conn.execute(text(create_audit_table))
+    except Exception as e:
+        st.error("Database Initialization Error: Unable to connect or execute setup.")
+        st.code(str(e), language="bash")
+        st.stop()
+
+# Run DB Initialization
 init_db()
 
-# -----------------------------------------------------------------------------
-# DATABASE HELPER FUNCTIONS
-# -----------------------------------------------------------------------------
-def save_appointment(cssn, file_no, full_name, mda, cadre, grade_level, date_issued, status, doc_hash):
-    """Saves or updates an appointment record permanently in Supabase PostgreSQL."""
-    query = text('''
-        INSERT INTO csc_registry (cssn, file_no, full_name, mda, cadre, grade_level, date_issued, status, doc_hash)
-        VALUES (:cssn, :file_no, :full_name, :mda, :cadre, :grade_level, :date_issued, :status, :doc_hash)
-        ON CONFLICT (cssn) DO UPDATE SET
-            file_no = EXCLUDED.file_no,
-            full_name = EXCLUDED.full_name,
-            mda = EXCLUDED.mda,
-            cadre = EXCLUDED.cadre,
-            grade_level = EXCLUDED.grade_level,
-            date_issued = EXCLUDED.date_issued,
-            status = EXCLUDED.status,
-            doc_hash = EXCLUDED.doc_hash;
-    ''')
-    with engine.begin() as conn:
-        conn.execute(query, {
-            "cssn": cssn.strip().upper(),
-            "file_no": file_no.strip().upper(),
-            "full_name": full_name.strip(),
-            "mda": mda.strip(),
-            "cadre": cadre.strip(),
-            "grade_level": grade_level.strip(),
-            "date_issued": str(date_issued),
-            "status": status,
-            "doc_hash": doc_hash
-        })
-
-def get_appointment_by_cssn(cssn):
-    """Queries a record from Supabase by CSSN."""
-    query = text("SELECT * FROM csc_registry WHERE UPPER(cssn) = UPPER(:cssn)")
-    with engine.connect() as conn:
-        return pd.read_sql_query(query, conn, params={"cssn": cssn.strip()})
-
-def get_all_appointments():
-    """Fetches all registered records from Supabase."""
-    query = text("SELECT * FROM csc_registry ORDER BY date_issued DESC")
-    with engine.connect() as conn:
-        return pd.read_sql_query(query, conn)
-
-def log_audit(search_query, verdict, details):
-    """Logs verification attempts to Supabase audit trail."""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    query = text('''
-        INSERT INTO csc_audit_logs (timestamp, search_query, verdict, details)
-        VALUES (:timestamp, :search_query, :verdict, :details)
-    ''')
-    with engine.begin() as conn:
-        conn.execute(query, {
-            "timestamp": timestamp,
-            "search_query": search_query,
-            "verdict": verdict,
-            "details": details
-        })
-
-def get_all_audit_logs():
-    """Retrieves all verification audit logs from Supabase."""
-    query = text("SELECT timestamp, search_query, verdict, details FROM csc_audit_logs ORDER BY id DESC")
-    with engine.connect() as conn:
-        return pd.read_sql_query(query, conn)
-
-# -----------------------------------------------------------------------------
-# CRYPTOGRAPHIC UTILITIES
-# -----------------------------------------------------------------------------
-def generate_document_hash(file_no, full_name, mda, grade_level, date_issued):
-    """Computes a SHA-256 cryptographic signature for letter contents."""
-    payload = f"{file_no.strip().upper()}|{full_name.strip().upper()}|{mda.strip().upper()}|{str(grade_level).strip()}|{str(date_issued).strip()}"
-    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
-
-def create_qr_code(data_dict):
-    """Generates an in-memory QR code image containing JSON payload."""
-    json_payload = json.dumps(data_dict)
-    qr = qrcode.QRCode(version=1, box_size=5, border=2)
-    qr.add_data(json_payload)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="#1B5E20", back_color="white")
-    
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-# -----------------------------------------------------------------------------
-# APPLICATION TABS
-# -----------------------------------------------------------------------------
-tab1, tab2, tab3 = st.tabs([
-    "🔍 Real-Time Document Verification", 
-    "✍️ CSC Letter Issuance (Admin)", 
-    "📋 Master Registry & Audit Logs"
-])
-
-# -----------------------------------------------------------------------------
-# TAB 1: REAL-TIME VERIFICATION ENGINE
-# -----------------------------------------------------------------------------
-with tab1:
-    st.subheader("Verify Appointment Letter Authenticity")
-    st.caption("Cross-examine presented appointment letters against the Taraba State CSC Supabase Database.")
-    
-    col_mode1, col_mode2 = st.columns([1, 2])
-    
-    with col_mode1:
-        verification_method = st.radio(
-            "Verification Input Mode",
-            ["Serial Number (CSSN) Lookup", "Manual Feature Hash Comparison"]
-        )
-    
-    with col_mode2:
-        if verification_method == "Serial Number (CSSN) Lookup":
-            search_cssn = st.text_input("Enter Civil Service Serial Number (CSSN)", placeholder="e.g. TSCSC/2025/APT/0104").strip()
-            verify_btn = st.button("🔎 Audit Document Authenticity", type="primary", use_container_width=True)
-            
-            if verify_btn and search_cssn:
-                matched_record = get_appointment_by_cssn(search_cssn)
-                
-                if not matched_record.empty:
-                    rec = matched_record.iloc[0]
-                    st.success("🟢 AUTHENTIC APPOINTMENT LETTER VERIFIED")
-                    
-                    st.markdown("### Official Record Details")
-                    res_col1, res_col2 = st.columns(2)
-                    with res_col1:
-                        st.write(f"**Full Name:** {rec['full_name']}")
-                        st.write(f"**Staff File Number:** {rec['file_no']}")
-                        st.write(f"**MDA Assigned:** {rec['mda']}")
-                    with res_col2:
-                        st.write(f"**Cadre/Post:** {rec['cadre']}")
-                        st.write(f"**Grade Level:** {rec['grade_level']}")
-                        st.write(f"**Date of Issue:** {rec['date_issued']}")
-                        st.write(f"**Record Status:** `{rec['status']}`")
-                        
-                    st.info(f"**Cryptographic Document Hash (SHA-256):** `{rec['doc_hash']}`")
-                    
-                    log_audit(search_cssn, "🟢 VERIFIED", f"Match found for {rec['full_name']} ({rec['file_no']})")
-                    
-                else:
-                    st.error("🔴 FAKE LETTER DETECTED / RECORD NOT FOUND")
-                    st.warning("⚠️ No appointment record matching this Serial Number exists in the Taraba State CSC Database. This document is unauthorized or fraudulent.")
-                    
-                    log_audit(search_cssn, "🔴 FAKE / NOT FOUND", "Unrecognized Serial Number searched.")
-
-        else:
-            st.markdown("#### Input Letter Attributes for Tamper Audit")
-            v_cssn = st.text_input("Serial Number (CSSN)", value="TSCSC/2025/APT/0104").strip()
-            v_file_no = st.text_input("File Number", value="TS/CSC/P/18204").strip()
-            v_name = st.text_input("Full Name", value="Danladi Musa Ibrahim").strip()
-            v_mda = st.text_input("MDA", value="Ministry of Finance, Budget & Economic Planning").strip()
-            v_gl = st.selectbox("Grade Level", ["GL 07", "GL 08", "GL 09", "GL 10", "GL 12", "GL 13", "GL 14"])
-            v_date = st.date_input("Date Issued", datetime.date(2025, 3, 15))
-            
-            if st.button("🔐 Run Hash Tamper Audit", type="primary"):
-                computed_hash = generate_document_hash(v_file_no, v_name, v_mda, v_gl, str(v_date))
-                
-                matched_record = get_appointment_by_cssn(v_cssn)
-                
-                if matched_record.empty:
-                    st.error("🔴 FAKE APPOINTMENT LETTER: Serial Number does not exist in state records.")
-                    log_audit(v_cssn, "🔴 FAKE / NOT FOUND", "Manual tamper audit with invalid CSSN.")
-                else:
-                    official_hash = matched_record.iloc[0]['doc_hash']
-                    if computed_hash == official_hash:
-                        st.success("🟢 DOCUMENT UNTAMPERED: All details match official records perfectly.")
-                        log_audit(v_cssn, "🟢 VERIFIED", "Tamper hash check passed.")
-                    else:
-                        st.error("🚨 FORGED / TAMPERED LETTER DETECTED!")
-                        st.write("The Serial Number exists, but **the details on this document have been altered post-issuance**.")
-                        st.write(f"**Expected Hash:** `{official_hash}`")
-                        st.write(f"**Computed Hash:** `{computed_hash}`")
-                        log_audit(v_cssn, "🚨 TAMPERED", "Document details differ from database hash.")
-
-# -----------------------------------------------------------------------------
-# TAB 2: CSC ADMIN LETTER ISSUANCE
-# -----------------------------------------------------------------------------
-with tab2:
-    st.subheader("Generate Official Civil Service Appointment Letter")
-    st.caption("Authorized CSC Officers only. Permanently registers letters to Supabase with embedded security markers.")
-    
-    with st.form("issue_letter_form"):
-        col_a, col_b = st.columns(2)
-        
-        with col_a:
-            in_file_no = st.text_input("Staff File Number", placeholder="e.g. TS/CSC/P/20491")
-            in_full_name = st.text_input("Candidate Full Name", placeholder="e.g. James Ezekiel Taraba")
-            in_mda = st.selectbox("Assign MDA", [
-                "Ministry of Agriculture & Natural Resources",
-                "Ministry of Education",
-                "Ministry of Health",
-                "Ministry of Works & Transport",
-                "Ministry of Finance, Budget & Economic Planning",
-                "Taraba State Board of Internal Revenue"
-            ])
-            
-        with col_b:
-            in_cadre = st.text_input("Cadre / Designation", placeholder="e.g. Senior Accountant")
-            in_gl = st.selectbox("Grade Level Allocated", ["GL 07", "GL 08", "GL 09", "GL 10", "GL 12", "GL 13", "GL 14"])
-            in_date = st.date_input("Date of Appointment", datetime.date.today())
-            
-        submit_issue = st.form_submit_button("📜 Register & Generate Verifiable Letter")
-        
-    if submit_issue:
-        if not in_file_no or not in_full_name:
-            st.error("Please fill in all required fields (File Number and Candidate Name).")
-        else:
-            year = in_date.year
-            rand_seq = datetime.datetime.now().strftime("%S%f")[:4]
-            generated_cssn = f"TSCSC/{year}/APT/{rand_seq}"
-            
-            doc_hash = generate_document_hash(in_file_no, in_full_name, in_mda, in_gl, str(in_date))
-            
-            # Save Permanently to Supabase
-            save_appointment(
-                generated_cssn, in_file_no, in_full_name, 
-                in_mda, in_cadre, in_gl, in_date, "ACTIVE", doc_hash
+# ==========================================
+# 3. HELPER FUNCTIONS
+# ==========================================
+def log_audit_search(query: str, status: str):
+    """Logs verification lookup attempts for security audit trailing."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("INSERT INTO csc_audit_logs (search_query, search_status) VALUES (:q, :s)"),
+                {"q": query.strip().upper(), "s": status}
             )
-            
-            st.success(f"✅ Appointment Record Saved to Cloud! Serial No: **{generated_cssn}**")
-            
-            # Generate Security QR Code
-            qr_payload = {
-                "CSSN": generated_cssn,
-                "File_No": in_file_no.upper().strip(),
-                "Name": in_full_name.strip(),
-                "Hash": doc_hash
-            }
-            qr_bytes = create_qr_code(qr_payload)
-            
-            st.markdown("---")
-            st.markdown("### 📄 Generated Document Preview")
-            
-            preview_col1, preview_col2 = st.columns([3, 1])
-            
-            with preview_col1:
-                st.markdown(f"""
-                **CIVIL SERVICE COMMISSION, TARABA STATE**  
-                **Serial No:** `{generated_cssn}`  
-                **Date:** {in_date.strftime('%B %d, %Y')}  
-                
-                **OFFER OF APPOINTMENT**  
-                
-                To: **{in_full_name.upper()}** ({in_file_no.upper()})  
-                
-                I am directed to inform you that the Civil Service Commission, Taraba State, has approved your appointment as **{in_cadre}** on **{in_gl}** in the **{in_mda}**.  
-                
-                *This letter is cryptographically signed and permanently stored in the state cloud database.*
-                """)
-            
-            with preview_col2:
-                st.image(qr_bytes, caption="Verification QR Code", width=150)
-                st.caption(f"Hash: `{doc_hash[:10]}...`")
+    except Exception as e:
+        st.warning(f"Audit log warning: {e}")
 
-# -----------------------------------------------------------------------------
-# TAB 3: REGISTRY DATABASE & AUDIT TRAIL
-# -----------------------------------------------------------------------------
-with tab3:
-    st.subheader("Master Appointment Registry (Supabase Cloud Database)")
-    
-    registry_df = get_all_appointments()
-    st.dataframe(
-        registry_df,
-        use_container_width=True,
-        hide_index=True
-    )
-    
-    csv_bytes = registry_df.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📥 Export Master Registry CSV",
-        data=csv_bytes,
-        file_name="taraba_csc_appointment_registry.csv",
-        mime="text/csv"
-    )
-    
-    st.markdown("---")
-    st.subheader("Verification Audit Logs")
-    
-    audit_df = get_all_audit_logs()
-    if audit_df.empty:
-        st.info("No verification attempts logged yet.")
-    else:
-        st.dataframe(
-            audit_df,
-            use_container_width=True,
-            hide_index=True
+def verify_appointment(search_key: str):
+    """Searches the CSC registry by File Number or QR Code ID."""
+    query_text = """
+    SELECT file_number, full_name, cadre, grade_level, mda, date_of_appointment, qr_code_id, created_at
+    FROM csc_registry
+    WHERE UPPER(file_number) = :key OR UPPER(qr_code_id) = :key
+    LIMIT 1;
+    """
+    with engine.connect() as conn:
+        result = conn.execute(text(query_text), {"key": search_key.strip().upper()}).fetchone()
+        return result
+
+def add_record(file_number, full_name, cadre, grade_level, mda, date_of_appointment, qr_code_id):
+    """Adds a new appointment record to the registry."""
+    insert_text = """
+    INSERT INTO csc_registry (file_number, full_name, cadre, grade_level, mda, date_of_appointment, qr_code_id)
+    VALUES (:file_num, :name, :cadre, :gl, :mda, :doa, :qr_id);
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(insert_text),
+            {
+                "file_num": file_number.strip().upper(),
+                "name": full_name.strip().title(),
+                "cadre": cadre.strip(),
+                "gl": grade_level.strip(),
+                "mda": mda.strip(),
+                "doa": date_of_appointment,
+                "qr_id": qr_code_id.strip().upper()
+            }
         )
+
+# ==========================================
+# 4. USER INTERFACE (SIDEBAR & NAVIGATION)
+# ==========================================
+st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/a/a8/Coat_of_arms_of_Nigeria.svg", width=100)
+st.sidebar.title("Taraba State CSC")
+st.sidebar.markdown("**Appointment Letter Verification System**")
+
+page = st.sidebar.radio("Navigation", ["🔍 Public Verification Portal", "🔐 Admin Dashboard"])
+
+# ==========================================
+# 5. PUBLIC VERIFICATION PORTAL
+# ==========================================
+if page == "🔍 Public Verification Portal":
+    st.markdown("<div class='main-header'><h2>TARABA STATE CIVIL SERVICE COMMISSION</h2><p>Official Verification Portal for CSC Appointment Letters</p></div>", unsafe_allow_html=True)
+    
+    st.info("💡 Enter the **CSC Reference / File Number** or scan the **QR Code ID** printed on the appointment letter to verify its authenticity.")
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        search_input = st.text_input("Enter Reference Number / File No / QR ID:", placeholder="e.g. TSB/CSC/2024/001 or QR-100234")
+    with col2:
+        st.write("")
+        st.write("")
+        verify_btn = st.button("Verify Letter", type="primary", use_container_width=True)
+
+    if verify_btn or search_input:
+        if not search_input.strip():
+            st.warning("Please enter a valid reference number or QR code ID.")
+        else:
+            record = verify_appointment(search_input)
+            
+            if record:
+                log_audit_search(search_input, "VERIFIED_AUTHENTIC")
+                st.markdown(
+                    f"""
+                    <div class='verified-badge'>
+                        <h3>✅ OFFICIAL RECORD VERIFIED</h3>
+                        <p>This appointment letter is authentic and registered in the Taraba State Civil Service Commission Database.</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+                
+                # Display Verification Details
+                res_col1, res_col2 = st.columns(2)
+                with res_col1:
+                    st.markdown(f"**Full Name:** {record.full_name}")
+                    st.markdown(f"**File Number:** {record.file_number}")
+                    st.markdown(f"**Cadre/Post:** {record.cadre}")
+                    st.markdown(f"**Grade Level:** {record.grade_level}")
+                
+                with res_col2:
+                    st.markdown(f"**Ministry / MDA:** {record.mda}")
+                    st.markdown(f"**Date of Appointment:** {record.date_of_appointment.strftime('%B %d, %Y')}")
+                    st.markdown(f"**System Security ID:** `{record.qr_code_id}`")
+                    st.markdown(f"**Verification Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S WAT')}")
+                    
+            else:
+                log_audit_search(search_input, "UNVERIFIED_INVALID")
+                st.markdown(
+                    f"""
+                    <div class='unverified-badge'>
+                        <h3>⚠️ RECORD NOT FOUND</h3>
+                        <p>No appointment record matches <b>"{search_input}"</b>. This document may be invalid, unissued, or falsified. Please report to the Civil Service Commission, Jalingo.</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+# ==========================================
+# 6. ADMIN DASHBOARD
+# ==========================================
+elif page == "🔐 Admin Dashboard":
+    st.markdown("<div class='main-header'><h2>CSC Admin Registry Management</h2></div>", unsafe_allow_html=True)
+    
+    # Admin Password Authentication
+    admin_password = st.sidebar.text_input("Admin Password", type="password")
+    SECRET_ADMIN_PASS = st.secrets.get("admin", {}).get("password", "TarabaCSC2026!")
+
+    if admin_password != SECRET_ADMIN_PASS:
+        st.warning("Enter valid administrative credentials in the sidebar to access registry management.")
+    else:
+        st.success("Authenticated as Authorized CSC Administrator")
+        
+        tab1, tab2, tab3 = st.tabs(["➕ Add New Record", "📋 View All Records", "📊 Audit Log Trail"])
+        
+        # TAB 1: ADD RECORD
+        with tab1:
+            st.subheader("Register New Appointment Letter")
+            with st.form("add_record_form", clear_on_submit=True):
+                col1, col2 = st.columns(2)
+                with col1:
+                    file_no = st.text_input("File Number *", placeholder="TSB/CSC/2026/045")
+                    full_name = st.text_input("Full Name *", placeholder="e.g. John Danjuma Bako")
+                    cadre = st.text_input("Cadre / Post *", placeholder="Administrative Officer II")
+                    grade_level = st.selectbox("Grade Level *", [f"GL {i:02d}" for i in range(1, 18)])
+                
+                with col2:
+                    mda = st.text_input("Ministry / Department / Agency *", placeholder="Ministry of Finance, Budget & Economic Planning")
+                    doa = st.date_input("Date of Effective Appointment")
+                    qr_code = st.text_input("Generated Security/QR ID *", placeholder="QR-2026-9901")
+                
+                submitted = st.form_submit_button("Save to Supabase Database", type="primary")
+                
+                if submitted:
+                    if not (file_no and full_name and cadre and mda and qr_code):
+                        st.error("Please fill in all required fields marked with *")
+                    else:
+                        try:
+                            add_record(file_no, full_name, cadre, grade_level, mda, doa, qr_code)
+                            st.success(f"Successfully registered appointment for {full_name} ({file_no})!")
+                        except Exception as e:
+                            st.error(f"Failed to register record. Check if File Number or QR ID already exists.")
+                            st.code(str(e))
+                            
+        # TAB 2: VIEW RECORDS
+        with tab2:
+            st.subheader("CSC Master Registry")
+            try:
+                df_records = pd.read_sql("SELECT * FROM csc_registry ORDER BY id DESC;", engine)
+                st.dataframe(df_records, use_container_width=True)
+                st.caption(f"Total Registered Letters: {len(df_records)}")
+            except Exception as e:
+                st.error(f"Error fetching records: {e}")
+                
+        # TAB 3: AUDIT TRAIL
+        with tab3:
+            st.subheader("System Verification Audit Logs")
+            try:
+                df_audit = pd.read_sql("SELECT * FROM csc_audit_logs ORDER BY id DESC LIMIT 100;", engine)
+                st.dataframe(df_audit, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error fetching audit logs: {e}")
