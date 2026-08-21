@@ -281,8 +281,11 @@ elif page == "🔐 Admin Dashboard":
         tab1, tab2, tab3 = st.tabs(["➕ Add New Record", "📋 View All Records", "📊 Audit Log Trail"])
         
         # TAB 1: ADD RECORD & GENERATE QR CODE
+        # TAB 1: ADD RECORD & GENERATE QR CODE
         with tab1:
             st.subheader("Register New Appointment Letter")
+            
+            # Form container ONLY for text inputs and the main submission button
             with st.form("add_record_form", clear_on_submit=False):
                 col1, col2 = st.columns(2)
                 with col1:
@@ -307,34 +310,41 @@ elif page == "🔐 Admin Dashboard":
                             add_record(file_no, full_name, cadre, grade_level, mda, doa, qr_code_id)
                             st.success(f"Successfully registered appointment for {full_name} ({file_no})!")
                             
-                            # 2. Build QR code string payload
+                            # 2. Build QR payload & generate image bytes
                             qr_payload = f"TARABA STATE CSC VERIFICATION\nFile No: {file_no.upper()}\nSecurity ID: {qr_code_id.upper()}\nName: {full_name}"
-                            
-                            # 3. Generate PNG QR bytes
                             qr_img_bytes = generate_qr_code(qr_payload)
                             
-                            # 4. Display and Download UI
-                            st.divider()
-                            st.subheader("Generated Official Security QR Code")
-                            qr_col1, qr_col2 = st.columns([1, 2])
-                            
-                            with qr_col1:
-                                st.image(qr_img_bytes, caption=f"QR Code for {file_no.upper()}", width=200)
-                            
-                            with qr_col2:
-                                st.markdown("### Print Ready Badge")
-                                st.write("Download this QR code PNG and attach/print it onto the official physical appointment letter.")
-                                
-                                st.download_button(
-                                    label="📥 Download QR Code PNG",
-                                    data=qr_img_bytes,
-                                    file_name=f"CSC_QR_{file_no.replace('/', '_')}.png",
-                                    mime="image/png",
-                                    type="primary"
-                                )
+                            # 3. Store in session_state to display outside the form
+                            st.session_state["last_registered_qr"] = {
+                                "bytes": qr_img_bytes,
+                                "file_no": file_no.upper(),
+                                "filename": f"CSC_QR_{file_no.replace('/', '_')}.png"
+                            }
                         except Exception as e:
                             st.error("Failed to register record. Check if File Number or QR ID already exists.")
                             st.code(str(e))
+
+            # RENDER DOWNLOAD SECTION OUTSIDE THE FORM
+            if "last_registered_qr" in st.session_state and st.session_state["last_registered_qr"]:
+                qr_data = st.session_state["last_registered_qr"]
+                st.divider()
+                st.subheader("Generated Official Security QR Code")
+                qr_col1, qr_col2 = st.columns([1, 2])
+                
+                with qr_col1:
+                    st.image(qr_data["bytes"], caption=f"QR Code for {qr_data['file_no']}", width=200)
+                
+                with qr_col2:
+                    st.markdown("### Print Ready Badge")
+                    st.write("Download this QR code PNG and attach/print it onto the official physical appointment letter.")
+                    
+                    st.download_button(
+                        label="📥 Download QR Code PNG",
+                        data=qr_data["bytes"],
+                        file_name=qr_data["filename"],
+                        mime="image/png",
+                        type="primary"
+                    )
                             
         # TAB 2: VIEW RECORDS
         with tab2:
