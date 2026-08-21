@@ -3,9 +3,9 @@ import pandas as pd
 import hashlib
 import json
 import datetime
-import sqlite3
 import qrcode
 from io import BytesIO
+from sqlalchemy import create_engine, text
 
 # -----------------------------------------------------------------------------
 # PAGE CONFIGURATION & STYLING
@@ -39,106 +39,108 @@ st.markdown('<div class="sub-header">Civil Service Commission, P.M.B. 1024, Jali
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
-# DATABASE MANAGEMENT (SQLITE)
+# SUPABASE / POSTGRESQL DATABASE ENGINE
 # -----------------------------------------------------------------------------
-DB_FILE = "csc_database.db"
+@st.cache_resource
+def get_db_engine():
+    """Establishes a cached connection engine to Supabase PostgreSQL."""
+    db_url = st.secrets["postgres"]["url"]
+    return create_engine(db_url, pool_pre_ping=True)
+
+engine = get_db_engine()
 
 def init_db():
-    """Initializes the SQLite database tables and seeds default records if empty."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    # Master Registry Table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS registry (
-            cssn TEXT PRIMARY KEY,
-            file_no TEXT,
-            full_name TEXT,
-            mda TEXT,
-            cadre TEXT,
-            grade_level TEXT,
-            date_issued TEXT,
-            status TEXT,
-            doc_hash TEXT
-        )
-    ''')
-    
-    # Audit Logs Table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            search_query TEXT,
-            verdict TEXT,
-            details TEXT
-        )
-    ''')
-    
-    conn.commit()
-    
-    # Seed default data if table is completely empty
-    cursor.execute("SELECT COUNT(*) FROM registry")
-    count = cursor.fetchone()[0]
-    
-    if count == 0:
-        seed_records = [
-            ("TSCSC/2025/APT/0104", "TS/CSC/P/18204", "Danladi Musa Ibrahim", "Ministry of Finance, Budget & Economic Planning", "Administrative Officer II", "GL 08", "2025-03-15", "ACTIVE", generate_document_hash("TS/CSC/P/18204", "Danladi Musa Ibrahim", "Ministry of Finance, Budget & Economic Planning", "GL 08", "2025-03-15")),
-            ("TSCSC/2024/APT/0892", "TS/CSC/M/09211", "Amina Usman Bello", "Ministry of Education", "Education Officer I", "GL 09", "2024-11-01", "ACTIVE", generate_document_hash("TS/CSC/M/09211", "Amina Usman Bello", "Ministry of Education", "GL 09", "2024-11-01"))
-        ]
-        cursor.executemany('''
-            INSERT INTO registry (cssn, file_no, full_name, mda, cadre, grade_level, date_issued, status, doc_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', seed_records)
-        conn.commit()
-        
-    conn.close()
+    """Creates database tables in Supabase if they do not exist."""
+    with engine.begin() as conn:
+        conn.execute(text('''
+            CREATE TABLE IF NOT EXISTS csc_registry (
+                cssn TEXT PRIMARY KEY,
+                file_no TEXT,
+                full_name TEXT,
+                mda TEXT,
+                cadre TEXT,
+                grade_level TEXT,
+                date_issued TEXT,
+                status TEXT,
+                doc_hash TEXT
+            );
+        '''))
+        conn.execute(text('''
+            CREATE TABLE IF NOT EXISTS csc_audit_logs (
+                id SERIAL PRIMARY KEY,
+                timestamp TEXT,
+                search_query TEXT,
+                verdict TEXT,
+                details TEXT
+            );
+        '''))
 
+# Initialize database schema
+init_db()
+
+# -----------------------------------------------------------------------------
+# DATABASE HELPER FUNCTIONS
+# -----------------------------------------------------------------------------
 def save_appointment(cssn, file_no, full_name, mda, cadre, grade_level, date_issued, status, doc_hash):
-    """Saves a new appointment record permanently to SQLite."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO registry (cssn, file_no, full_name, mda, cadre, grade_level, date_issued, status, doc_hash)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (cssn.strip().upper(), file_no.strip().upper(), full_name.strip(), mda.strip(), cadre.strip(), grade_level.strip(), str(date_issued), status, doc_hash))
-    conn.commit()
-    conn.close()
+    """Saves or updates an appointment record permanently in Supabase PostgreSQL."""
+    query = text('''
+        INSERT INTO csc_registry (cssn, file_no, full_name, mda, cadre, grade_level, date_issued, status, doc_hash)
+        VALUES (:cssn, :file_no, :full_name, :mda, :cadre, :grade_level, :date_issued, :status, :doc_hash)
+        ON CONFLICT (cssn) DO UPDATE SET
+            file_no = EXCLUDED.file_no,
+            full_name = EXCLUDED.full_name,
+            mda = EXCLUDED.mda,
+            cadre = EXCLUDED.cadre,
+            grade_level = EXCLUDED.grade_level,
+            date_issued = EXCLUDED.date_issued,
+            status = EXCLUDED.status,
+            doc_hash = EXCLUDED.doc_hash;
+    ''')
+    with engine.begin() as conn:
+        conn.execute(query, {
+            "cssn": cssn.strip().upper(),
+            "file_no": file_no.strip().upper(),
+            "full_name": full_name.strip(),
+            "mda": mda.strip(),
+            "cadre": cadre.strip(),
+            "grade_level": grade_level.strip(),
+            "date_issued": str(date_issued),
+            "status": status,
+            "doc_hash": doc_hash
+        })
 
 def get_appointment_by_cssn(cssn):
-    """Retrieves an appointment record from SQLite by CSSN."""
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT * FROM registry WHERE UPPER(cssn) = UPPER(?)", conn, params=(cssn.strip(),))
-    conn.close()
-    return df
+    """Queries a record from Supabase by CSSN."""
+    query = text("SELECT * FROM csc_registry WHERE UPPER(cssn) = UPPER(:cssn)")
+    with engine.connect() as conn:
+        return pd.read_sql_query(query, conn, params={"cssn": cssn.strip()})
 
 def get_all_appointments():
-    """Retrieves all registered records from SQLite."""
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT * FROM registry ORDER BY date_issued DESC", conn)
-    conn.close()
-    return df
+    """Fetches all registered records from Supabase."""
+    query = text("SELECT * FROM csc_registry ORDER BY date_issued DESC")
+    with engine.connect() as conn:
+        return pd.read_sql_query(query, conn)
 
 def log_audit(search_query, verdict, details):
-    """Logs verification attempts to SQLite."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
+    """Logs verification attempts to Supabase audit trail."""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute('''
-        INSERT INTO audit_logs (timestamp, search_query, verdict, details)
-        VALUES (?, ?, ?, ?)
-    ''', (timestamp, search_query, verdict, details))
-    conn.commit()
-    conn.close()
+    query = text('''
+        INSERT INTO csc_audit_logs (timestamp, search_query, verdict, details)
+        VALUES (:timestamp, :search_query, :verdict, :details)
+    ''')
+    with engine.begin() as conn:
+        conn.execute(query, {
+            "timestamp": timestamp,
+            "search_query": search_query,
+            "verdict": verdict,
+            "details": details
+        })
 
 def get_all_audit_logs():
-    """Retrieves all verification audit logs."""
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT timestamp, search_query, verdict, details FROM audit_logs ORDER BY id DESC", conn)
-    conn.close()
-    return df
-
-# Initialize Database on Run
-init_db()
+    """Retrieves all verification audit logs from Supabase."""
+    query = text("SELECT timestamp, search_query, verdict, details FROM csc_audit_logs ORDER BY id DESC")
+    with engine.connect() as conn:
+        return pd.read_sql_query(query, conn)
 
 # -----------------------------------------------------------------------------
 # CRYPTOGRAPHIC UTILITIES
@@ -174,7 +176,7 @@ tab1, tab2, tab3 = st.tabs([
 # -----------------------------------------------------------------------------
 with tab1:
     st.subheader("Verify Appointment Letter Authenticity")
-    st.caption("Cross-examine presented appointment letters against the Taraba State CSC Persistent Database.")
+    st.caption("Cross-examine presented appointment letters against the Taraba State CSC Supabase Database.")
     
     col_mode1, col_mode2 = st.columns([1, 2])
     
@@ -252,7 +254,7 @@ with tab1:
 # -----------------------------------------------------------------------------
 with tab2:
     st.subheader("Generate Official Civil Service Appointment Letter")
-    st.caption("Authorized CSC Officers only. Permanently registers letters to SQLite with embedded security markers.")
+    st.caption("Authorized CSC Officers only. Permanently registers letters to Supabase with embedded security markers.")
     
     with st.form("issue_letter_form"):
         col_a, col_b = st.columns(2)
@@ -286,13 +288,13 @@ with tab2:
             
             doc_hash = generate_document_hash(in_file_no, in_full_name, in_mda, in_gl, str(in_date))
             
-            # Save Permanently to SQLite
+            # Save Permanently to Supabase
             save_appointment(
                 generated_cssn, in_file_no, in_full_name, 
                 in_mda, in_cadre, in_gl, in_date, "ACTIVE", doc_hash
             )
             
-            st.success(f"✅ Appointment Record Registered Permanently! Serial No: **{generated_cssn}**")
+            st.success(f"✅ Appointment Record Saved to Cloud! Serial No: **{generated_cssn}**")
             
             # Generate Security QR Code
             qr_payload = {
@@ -320,7 +322,7 @@ with tab2:
                 
                 I am directed to inform you that the Civil Service Commission, Taraba State, has approved your appointment as **{in_cadre}** on **{in_gl}** in the **{in_mda}**.  
                 
-                *This letter is cryptographically signed and permanently saved in the state database.*
+                *This letter is cryptographically signed and permanently stored in the state cloud database.*
                 """)
             
             with preview_col2:
@@ -331,7 +333,7 @@ with tab2:
 # TAB 3: REGISTRY DATABASE & AUDIT TRAIL
 # -----------------------------------------------------------------------------
 with tab3:
-    st.subheader("Master Appointment Registry (SQLite Database)")
+    st.subheader("Master Appointment Registry (Supabase Cloud Database)")
     
     registry_df = get_all_appointments()
     st.dataframe(
@@ -340,7 +342,6 @@ with tab3:
         hide_index=True
     )
     
-    # Download Registry as CSV
     csv_bytes = registry_df.to_csv(index=False).encode('utf-8')
     st.download_button(
         label="📥 Export Master Registry CSV",
