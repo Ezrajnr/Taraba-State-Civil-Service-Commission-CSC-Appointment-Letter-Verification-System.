@@ -47,35 +47,29 @@ def get_db_engine():
     db_url = st.secrets["postgres"]["url"]
     return create_engine(db_url, pool_pre_ping=True)
 
-engine = get_db_engine()
+import streamlit as st
+import urllib.parse
+from sqlalchemy import create_engine, text
 
 def init_db():
-    """Creates database tables in Supabase if they do not exist."""
-    with engine.begin() as conn:
-        conn.execute(text('''
-            CREATE TABLE IF NOT EXISTS csc_registry (
-                cssn TEXT PRIMARY KEY,
-                file_no TEXT,
-                full_name TEXT,
-                mda TEXT,
-                cadre TEXT,
-                grade_level TEXT,
-                date_issued TEXT,
-                status TEXT,
-                doc_hash TEXT
-            );
-        '''))
-        conn.execute(text('''
-            CREATE TABLE IF NOT EXISTS csc_audit_logs (
-                id SERIAL PRIMARY KEY,
-                timestamp TEXT,
-                search_query TEXT,
-                verdict TEXT,
-                details TEXT
-            );
-        '''))
+    try:
+        # Retrieve connection string from Streamlit secrets
+        db_url = st.secrets["postgres"]["url"]
+        
+        # Initialize SQLAlchemy Engine
+        engine = create_engine(db_url)
+        
+        with engine.begin() as conn:
+            # Simple health check query
+            conn.execute(text("SELECT 1;"))
+        st.success("Successfully connected to the database!")
+        
+    except Exception as e:
+        st.error("Database Connection Failed!")
+        st.code(str(e), language="bash")
+        st.stop()
 
-# Initialize database schema
+# Call DB initialization
 init_db()
 
 # -----------------------------------------------------------------------------
