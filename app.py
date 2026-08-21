@@ -1,11 +1,13 @@
-import streamlit as st
-import pandas as pd
+import io
 import urllib.parse
 from datetime import datetime
+import pandas as pd
+import qrcode
 from sqlalchemy import create_engine, text
+import streamlit as st
 
 # ==========================================
-# 1. PAGE CONFIGURATION & STYLING
+# 1. PAGE CONFIGURATION & INITIAL STATE
 # ==========================================
 st.set_page_config(
     page_title="Taraba State CSC - Appointment Verification System",
@@ -13,6 +15,10 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Initialize Session State Variables at Top-Level
+if "admin_logged_in" not in st.session_state:
+    st.session_state["admin_logged_in"] = False
 
 # Custom CSS Styling
 st.markdown(
@@ -50,15 +56,10 @@ st.markdown(
 # ==========================================
 @st.cache_resource
 def get_db_engine():
-    """
-    Safely builds SQLAlchemy engine using structured secrets
-    and encodes special characters in passwords.
-    """
     try:
         if "postgres" in st.secrets and "user" in st.secrets["postgres"]:
             pg = st.secrets["postgres"]
             user = pg["user"]
-            # Encodes special characters (@, #, !, %, etc.) in password
             password = urllib.parse.quote_plus(pg["password"])
             host = pg["host"]
             port = pg["port"]
@@ -76,7 +77,6 @@ def get_db_engine():
 engine = get_db_engine()
 
 def init_db():
-    """Initializes tables in Supabase PostgreSQL if they do not exist."""
     create_registry_table = """
     CREATE TABLE IF NOT EXISTS csc_registry (
         id SERIAL PRIMARY KEY,
@@ -109,19 +109,13 @@ def init_db():
         st.code(str(e), language="bash")
         st.stop()
 
-# Run DB Initialization
 init_db()
 
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
-import io
-import qrcode
-
 def generate_qr_code(data_string: str) -> bytes:
-    """
-    Generates a PNG QR code image as bytes in memory.
-    """
+    """Generates a PNG QR code image as bytes in memory."""
     qr = qrcode.QRCode(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_H,
@@ -133,12 +127,11 @@ def generate_qr_code(data_string: str) -> bytes:
     
     img = qr.make_image(fill_color="black", back_color="white")
     
-    # Save image to in-memory byte buffer
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
 def log_audit_search(query: str, status: str):
-    """Logs verification lookup attempts for security audit trailing."""
     try:
         with engine.begin() as conn:
             conn.execute(
@@ -149,7 +142,6 @@ def log_audit_search(query: str, status: str):
         st.warning(f"Audit log warning: {e}")
 
 def verify_appointment(search_key: str):
-    """Searches the CSC registry by File Number or QR Code ID."""
     query_text = """
     SELECT file_number, full_name, cadre, grade_level, mda, date_of_appointment, qr_code_id, created_at
     FROM csc_registry
@@ -161,7 +153,6 @@ def verify_appointment(search_key: str):
         return result
 
 def add_record(file_number, full_name, cadre, grade_level, mda, date_of_appointment, qr_code_id):
-    """Adds a new appointment record to the registry."""
     insert_text = """
     INSERT INTO csc_registry (file_number, full_name, cadre, grade_level, mda, date_of_appointment, qr_code_id)
     VALUES (:file_num, :name, :cadre, :gl, :mda, :doa, :qr_id);
@@ -183,9 +174,16 @@ def add_record(file_number, full_name, cadre, grade_level, mda, date_of_appointm
 # ==========================================
 # 4. USER INTERFACE (SIDEBAR & NAVIGATION)
 # ==========================================
-st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/a/a8/Coat_of_arms_of_Nigeria.svg", width=100)
+NIGERIA_COAT_OF_ARMS = "https://raw.githubusercontent.com/datasets/geo-boundaries/master/graphics/coat_of_arms/ng.png"
+
+try:
+    st.sidebar.image(NIGERIA_COAT_OF_ARMS, width=120)
+except Exception:
+    st.sidebar.markdown("🏛️ **TARABA STATE GOVT**")
+
 st.sidebar.title("Taraba State CSC")
-st.sidebar.markdown("**Appointment Letter Verification System**")
+st.sidebar.markdown("**Appointment Verification System**")
+st.sidebar.divider()
 
 page = st.sidebar.radio("Navigation", ["🔍 Public Verification Portal", "🔐 Admin Dashboard"])
 
@@ -199,7 +197,7 @@ if page == "🔍 Public Verification Portal":
 
     col1, col2 = st.columns([3, 1])
     with col1:
-        search_input = st.text_input("Enter Reference Number / File No / QR ID:", placeholder="e.g. TSB/CSC/2024/001 or QR-100234")
+        search_input = st.text_input("Enter Reference Number / File No / QR ID:", placeholder="e.g. TSB/CSC/2026/001 or QR-100234")
     with col2:
         st.write("")
         st.write("")
@@ -214,7 +212,7 @@ if page == "🔍 Public Verification Portal":
             if record:
                 log_audit_search(search_input, "VERIFIED_AUTHENTIC")
                 st.markdown(
-                    f"""
+                    """
                     <div class='verified-badge'>
                         <h3>✅ OFFICIAL RECORD VERIFIED</h3>
                         <p>This appointment letter is authentic and registered in the Taraba State Civil Service Commission Database.</p>
@@ -223,7 +221,6 @@ if page == "🔍 Public Verification Portal":
                     unsafe_allow_html=True
                 )
                 
-                # Display Verification Details
                 res_col1, res_col2 = st.columns(2)
                 with res_col1:
                     st.markdown(f"**Full Name:** {record.full_name}")
@@ -237,7 +234,19 @@ if page == "🔍 Public Verification Portal":
                     st.markdown(f"**System Security ID:** `{record.qr_code_id}`")
                     st.markdown(f"**Verification Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S WAT')}")
                     
-            # ==========================================
+            else:
+                log_audit_search(search_input, "UNVERIFIED_INVALID")
+                st.markdown(
+                    f"""
+                    <div class='unverified-badge'>
+                        <h3>⚠️ RECORD NOT FOUND</h3>
+                        <p>No appointment record matches <b>"{search_input}"</b>. This document may be invalid, unissued, or falsified. Please report to the Civil Service Commission, Jalingo.</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+# ==========================================
 # 6. ADMIN DASHBOARD WITH FORM LOGIN
 # ==========================================
 elif page == "🔐 Admin Dashboard":
@@ -245,8 +254,8 @@ elif page == "🔐 Admin Dashboard":
     
     SECRET_ADMIN_PASS = st.secrets.get("admin", {}).get("password", "TarabaCSC2026!")
 
-    # Check session state for login
-    if not st.session_state["admin_logged_in"]:
+    # Safe session state key retrieval
+    if not st.session_state.get("admin_logged_in", False):
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.subheader("Administrator Login")
@@ -262,15 +271,13 @@ elif page == "🔐 Admin Dashboard":
                     else:
                         st.error("Invalid Administrative Password.")
     else:
-        # Show logged in status and logout button in sidebar
+        # Show status and logout in sidebar when authenticated
         st.sidebar.success("Status: Authenticated Admin")
         if st.sidebar.button("Logout of Admin Session", type="secondary"):
             st.session_state["admin_logged_in"] = False
             st.rerun()
 
-        # -------------------------------------------------------------
-        # TABS MUST BE CREATED INSIDE THIS 'ELSE' BLOCK (AUTHENTICATED)
-        # -------------------------------------------------------------
+        # Tabs are initialized ONLY when logged in
         tab1, tab2, tab3 = st.tabs(["➕ Add New Record", "📋 View All Records", "📊 Audit Log Trail"])
         
         # TAB 1: ADD RECORD & GENERATE QR CODE
@@ -296,11 +303,11 @@ elif page == "🔐 Admin Dashboard":
                         st.error("Please fill in all required fields marked with *")
                     else:
                         try:
-                            # 1. Save to Supabase DB
+                            # 1. Save record to DB
                             add_record(file_no, full_name, cadre, grade_level, mda, doa, qr_code_id)
                             st.success(f"Successfully registered appointment for {full_name} ({file_no})!")
                             
-                            # 2. Build verification data payload for QR code
+                            # 2. Build QR code string payload
                             qr_payload = f"TARABA STATE CSC VERIFICATION\nFile No: {file_no.upper()}\nSecurity ID: {qr_code_id.upper()}\nName: {full_name}"
                             
                             # 3. Generate PNG QR bytes
@@ -328,69 +335,6 @@ elif page == "🔐 Admin Dashboard":
                         except Exception as e:
                             st.error("Failed to register record. Check if File Number or QR ID already exists.")
                             st.code(str(e))
-                            
-        # TAB 2: VIEW RECORDS
-        with tab2:
-            st.subheader("CSC Master Registry")
-            try:
-                df_records = pd.read_sql("SELECT * FROM csc_registry ORDER BY id DESC;", engine)
-                st.dataframe(df_records, use_container_width=True)
-                st.caption(f"Total Registered Letters: {len(df_records)}")
-            except Exception as e:
-                st.error(f"Error fetching records: {e}")
-                
-        # TAB 3: AUDIT TRAIL
-        with tab3:
-            st.subheader("System Verification Audit Logs")
-            try:
-                df_audit = pd.read_sql("SELECT * FROM csc_audit_logs ORDER BY id DESC LIMIT 100;", engine)
-                st.dataframe(df_audit, use_container_width=True)
-            except Exception as e:
-                st.error(f"Error fetching audit logs: {e}")
-        with col2:
-            mda = st.text_input("Ministry / Department / Agency *", placeholder="Ministry of Finance, Budget & Economic Planning")
-            doa = st.date_input("Date of Effective Appointment")
-            qr_code_id = st.text_input("Generated Security/QR ID *", placeholder="QR-2026-9901")
-        
-        submitted = st.form_submit_button("Save Record & Generate QR Code", type="primary")
-        
-        if submitted:
-            if not (file_no and full_name and cadre and mda and qr_code_id):
-                st.error("Please fill in all required fields marked with *")
-            else:
-                try:
-                    # 1. Save to Supabase DB
-                    add_record(file_no, full_name, cadre, grade_level, mda, doa, qr_code_id)
-                    st.success(f"Successfully registered appointment for {full_name} ({file_no})!")
-                    
-                    # 2. Build verification data payload for QR code
-                    qr_payload = f"TARABA STATE CSC VERIFICATION\nFile No: {file_no.upper()}\nSecurity ID: {qr_code_id.upper()}\nName: {full_name}"
-                    
-                    # 3. Generate PNG QR bytes
-                    qr_img_bytes = generate_qr_code(qr_payload)
-                    
-                    # 4. Display and Download UI
-                    st.divider()
-                    st.subheader("Generated Official Security QR Code")
-                    qr_col1, qr_col2 = st.columns([1, 2])
-                    
-                    with qr_col1:
-                        st.image(qr_img_bytes, caption=f"QR Code for {file_no.upper()}", width=200)
-                    
-                    with qr_col2:
-                        st.markdown("### Print Ready Badge")
-                        st.write("Download this QR code PNG and attach/print it onto the official physical appointment letter.")
-                        
-                        st.download_button(
-                            label="📥 Download QR Code PNG",
-                            data=qr_img_bytes,
-                            file_name=f"CSC_QR_{file_no.replace('/', '_')}.png",
-                            mime="image/png",
-                            type="primary"
-                        )
-                except Exception as e:
-                    st.error("Failed to register record. Check if File Number or QR ID already exists.")
-                    st.code(str(e))
                             
         # TAB 2: VIEW RECORDS
         with tab2:
